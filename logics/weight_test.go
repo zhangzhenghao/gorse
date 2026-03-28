@@ -73,7 +73,7 @@ func TestEvaluateWeight(t *testing.T) {
 			got, err := EvaluateWeight(program, tt.value)
 			require.NoError(t, err)
 			if tt.tolerance > 0 {
-				assert.InDelta(t, tt.want, got, tt.tolerance)
+				assert.InDelta(t, float64(tt.want), float64(got), float64(tt.tolerance))
 			} else {
 				assert.Equal(t, tt.want, got)
 			}
