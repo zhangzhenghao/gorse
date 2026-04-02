@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/expr-lang/expr"
@@ -591,7 +592,7 @@ var getClusterCmd = &cobra.Command{
 
 		// Format as table
 		table := tablewriter.NewWriter(os.Stdout)
-		table.SetHeader([]string{"Type", "UUID", "Hostname", "Version", "Update Time"})
+		table.Header("Type", "UUID", "Hostname", "Version", "Update Time")
 		for _, node := range nodes {
 			table.Append([]string{
 				node.Type,
@@ -630,6 +631,24 @@ func init() {
 	getConfigCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
 	getClusterCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
 	getClusterCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
+	getCmd.AddCommand(getUserCmd)
+	getUserCmd.Flags().String("endpoint", "", "Gorse REST API endpoint (default: GORSE_ENDPOINT)")
+	getUserCmd.Flags().String("api-key", "", "Gorse REST API key (default: GORSE_API_KEY)")
+	getUserCmd.Flags().BoolP("feedback", "f", false, "Show user feedback records")
+	getCmd.AddCommand(getUsersCmd)
+	getUsersCmd.Flags().String("endpoint", "", "Gorse REST API endpoint (default: GORSE_ENDPOINT)")
+	getUsersCmd.Flags().String("api-key", "", "Gorse REST API key (default: GORSE_API_KEY)")
+	getUsersCmd.Flags().String("cursor", "", "Cursor for pagination")
+	getUsersCmd.Flags().IntP("n", "n", 10, "Number of users to return")
+	getCmd.AddCommand(getItemCmd)
+	getItemCmd.Flags().String("endpoint", "", "Gorse REST API endpoint (default: GORSE_ENDPOINT)")
+	getItemCmd.Flags().String("api-key", "", "Gorse REST API key (default: GORSE_API_KEY)")
+	getItemCmd.Flags().BoolP("feedback", "f", false, "Show item feedback records")
+	getCmd.AddCommand(getItemsCmd)
+	getItemsCmd.Flags().String("endpoint", "", "Gorse REST API endpoint (default: GORSE_ENDPOINT)")
+	getItemsCmd.Flags().String("api-key", "", "Gorse REST API key (default: GORSE_API_KEY)")
+	getItemsCmd.Flags().String("cursor", "", "Cursor for pagination")
+	getItemsCmd.Flags().IntP("n", "n", 10, "Number of items to return")
 
 	rootCmd.AddCommand(setCmd)
 	setCmd.AddCommand(setConfigCmd)
@@ -812,6 +831,335 @@ func parseConfigValue(value string) interface{} {
 
 	// Return as string
 	return value
+}
+
+// REST API configuration from environment variables
+var (
+	restAPIKey   = os.Getenv("GORSE_API_KEY")
+	restEndpoint = os.Getenv("GORSE_ENDPOINT")
+)
+
+// newRestClient creates a new resty client for REST API
+func newRestClient(endpoint, apiKey string) *resty.Client {
+	client := resty.New()
+	client.SetBaseURL(endpoint)
+	client.SetHeader("X-API-Key", apiKey)
+	return client
+}
+
+// getRestEndpointAndKey returns the endpoint and API key from flags or environment for REST API
+func getRestEndpointAndKey(cmd *cobra.Command) (endpoint, apiKey string) {
+	endpoint, _ = cmd.Flags().GetString("endpoint")
+	apiKey, _ = cmd.Flags().GetString("api-key")
+	if endpoint == "" {
+		endpoint = restEndpoint
+	}
+	if apiKey == "" {
+		apiKey = restAPIKey
+	}
+	return
+}
+
+// getUserCmd gets a single user from the REST API
+var getUserCmd = &cobra.Command{
+	Use:   "user <user_id>",
+	Short: "Get a user from Gorse REST API",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		endpoint, apiKey := getRestEndpointAndKey(cmd)
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ENDPOINT or --endpoint is required")
+		}
+
+		userId := args[0]
+		client := newRestClient(endpoint, apiKey)
+		resp, err := client.R().Get("/api/user/" + userId)
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+
+		if resp.IsError() {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
+		}
+
+		// Parse user response
+		var user data.User
+		if err := json.Unmarshal(resp.Body(), &user); err != nil {
+			log.Logger().Fatal("failed to parse response", zap.Error(err))
+		}
+
+		// Format as table
+		table := tablewriter.NewWriter(os.Stdout)
+		table.Header("UserId", "Labels", "Comment")
+		labelsJSON, _ := json.Marshal(user.Labels)
+		table.Append([]string{
+			user.UserId,
+			string(labelsJSON),
+			user.Comment,
+		})
+		table.Render()
+
+		// Check if --feedback flag is set
+		showFeedback, _ := cmd.Flags().GetBool("feedback")
+		if showFeedback {
+			resp, err := client.R().Get("/api/user/" + userId + "/feedback")
+			if err != nil {
+				log.Logger().Fatal("failed to get feedback", zap.Error(err))
+			}
+
+			if resp.IsError() {
+				log.Logger().Fatal("API request failed",
+					zap.Int("status", resp.StatusCode()),
+					zap.String("body", resp.String()))
+			}
+
+			// Parse feedback response
+			var feedbacks []data.Feedback
+			if err := json.Unmarshal(resp.Body(), &feedbacks); err != nil {
+				log.Logger().Fatal("failed to parse feedback response", zap.Error(err))
+			}
+
+			// Format feedback as table
+			if len(feedbacks) > 0 {
+				fmt.Println("\nUser Feedback:")
+				fbTable := tablewriter.NewWriter(os.Stdout)
+				fbTable.Header("FeedbackType", "ItemId", "Value", "Timestamp")
+				for _, fb := range feedbacks {
+					fbTable.Append([]string{
+						fb.FeedbackType,
+						fb.ItemId,
+						fmt.Sprintf("%.2f", fb.Value),
+						fb.Timestamp.Format("2006-01-02 15:04:05"),
+					})
+				}
+				fbTable.Render()
+			} else {
+				fmt.Println("\nNo feedback found for this user.")
+			}
+		}
+	},
+}
+
+// UserIterator represents the paginated user response from REST API
+type UserIterator struct {
+	Cursor string      `json:"Cursor"`
+	Users  []data.User `json:"Users"`
+}
+
+// ItemIterator represents the paginated item response from REST API
+type ItemIterator struct {
+	Cursor string      `json:"Cursor"`
+	Items  []data.Item `json:"Items"`
+}
+
+// getUsersCmd gets users from the REST API with pagination
+var getUsersCmd = &cobra.Command{
+	Use:   "users",
+	Short: "Get users from Gorse REST API",
+	Run: func(cmd *cobra.Command, args []string) {
+		endpoint, apiKey := getRestEndpointAndKey(cmd)
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ENDPOINT or --endpoint is required")
+		}
+
+		client := newRestClient(endpoint, apiKey)
+
+		// Build request with query params
+		req := client.R()
+		cursor, _ := cmd.Flags().GetString("cursor")
+		if cursor != "" {
+			req.SetQueryParam("cursor", cursor)
+		}
+		n, _ := cmd.Flags().GetInt("n")
+		if n > 0 {
+			req.SetQueryParam("n", strconv.Itoa(n))
+		}
+
+		resp, err := req.Get("/api/users")
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+
+		if resp.IsError() {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
+		}
+
+		// Parse users response
+		var result UserIterator
+		if err := json.Unmarshal(resp.Body(), &result); err != nil {
+			log.Logger().Fatal("failed to parse response", zap.Error(err))
+		}
+
+		// Format as table
+		table := tablewriter.NewWriter(os.Stdout)
+		table.Header("UserId", "Labels", "Comment")
+		for _, user := range result.Users {
+			labelsJSON, _ := json.Marshal(user.Labels)
+			table.Append([]string{
+				user.UserId,
+				string(labelsJSON),
+				user.Comment,
+			})
+		}
+		table.Render()
+
+		// Show cursor for next page if available
+		if result.Cursor != "" {
+			fmt.Printf("\nNext cursor: %s\n", result.Cursor)
+		}
+	},
+}
+
+// getItemCmd gets a single item from the REST API
+var getItemCmd = &cobra.Command{
+	Use:   "item <item_id>",
+	Short: "Get an item from Gorse REST API",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		endpoint, apiKey := getRestEndpointAndKey(cmd)
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ENDPOINT or --endpoint is required")
+		}
+
+		itemId := args[0]
+		client := newRestClient(endpoint, apiKey)
+		resp, err := client.R().Get("/api/item/" + itemId)
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+
+		if resp.IsError() {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
+		}
+
+		// Parse item response
+		var item data.Item
+		if err := json.Unmarshal(resp.Body(), &item); err != nil {
+			log.Logger().Fatal("failed to parse response", zap.Error(err))
+		}
+
+		// Format as table
+		table := tablewriter.NewWriter(os.Stdout)
+		table.Header("ItemId", "IsHidden", "Categories", "Timestamp", "Labels", "Comment")
+		labelsJSON, _ := json.Marshal(item.Labels)
+		categoriesJSON, _ := json.Marshal(item.Categories)
+		table.Append([]string{
+			item.ItemId,
+			strconv.FormatBool(item.IsHidden),
+			string(categoriesJSON),
+			item.Timestamp.Format("2006-01-02 15:04:05"),
+			string(labelsJSON),
+			item.Comment,
+		})
+		table.Render()
+
+		// Check if --feedback flag is set
+		showFeedback, _ := cmd.Flags().GetBool("feedback")
+		if showFeedback {
+			resp, err := client.R().Get("/api/item/" + itemId + "/feedback/")
+			if err != nil {
+				log.Logger().Fatal("failed to get feedback", zap.Error(err))
+			}
+
+			if resp.IsError() {
+				log.Logger().Fatal("API request failed",
+					zap.Int("status", resp.StatusCode()),
+					zap.String("body", resp.String()))
+			}
+
+			// Parse feedback response
+			var feedbacks []data.Feedback
+			if err := json.Unmarshal(resp.Body(), &feedbacks); err != nil {
+				log.Logger().Fatal("failed to parse feedback response", zap.Error(err))
+			}
+
+			// Format feedback as table
+			if len(feedbacks) > 0 {
+				fmt.Println("\nItem Feedback:")
+				fbTable := tablewriter.NewWriter(os.Stdout)
+				fbTable.Header("FeedbackType", "UserId", "Value", "Timestamp")
+				for _, fb := range feedbacks {
+					fbTable.Append([]string{
+						fb.FeedbackType,
+						fb.UserId,
+						fmt.Sprintf("%.2f", fb.Value),
+						fb.Timestamp.Format("2006-01-02 15:04:05"),
+					})
+				}
+				fbTable.Render()
+			} else {
+				fmt.Println("\nNo feedback found for this item.")
+			}
+		}
+	},
+}
+
+// getItemsCmd gets items from the REST API with pagination
+var getItemsCmd = &cobra.Command{
+	Use:   "items",
+	Short: "Get items from Gorse REST API",
+	Run: func(cmd *cobra.Command, args []string) {
+		endpoint, apiKey := getRestEndpointAndKey(cmd)
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ENDPOINT or --endpoint is required")
+		}
+
+		client := newRestClient(endpoint, apiKey)
+
+		// Build request with query params
+		req := client.R()
+		cursor, _ := cmd.Flags().GetString("cursor")
+		if cursor != "" {
+			req.SetQueryParam("cursor", cursor)
+		}
+		n, _ := cmd.Flags().GetInt("n")
+		if n > 0 {
+			req.SetQueryParam("n", strconv.Itoa(n))
+		}
+
+		resp, err := req.Get("/api/items")
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+
+		if resp.IsError() {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
+		}
+
+		// Parse items response
+		var result ItemIterator
+		if err := json.Unmarshal(resp.Body(), &result); err != nil {
+			log.Logger().Fatal("failed to parse response", zap.Error(err))
+		}
+
+		// Format as table
+		table := tablewriter.NewWriter(os.Stdout)
+		table.Header("ItemId", "IsHidden", "Categories", "Timestamp", "Comment")
+		for _, item := range result.Items {
+			categoriesJSON, _ := json.Marshal(item.Categories)
+			table.Append([]string{
+				item.ItemId,
+				strconv.FormatBool(item.IsHidden),
+				string(categoriesJSON),
+				item.Timestamp.Format("2006-01-02 15:04:05"),
+				item.Comment,
+			})
+		}
+		table.Render()
+
+		// Show cursor for next page if available
+		if result.Cursor != "" {
+			fmt.Printf("\nNext cursor: %s\n", result.Cursor)
+		}
+	},
 }
 
 
