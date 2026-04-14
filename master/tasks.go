@@ -419,17 +419,21 @@ func (m *Master) LoadDataFromDatabase(
 
 	// create negative feedback set (highest priority)
 	var negativeSet []mapset.Set[int32]
+	negativeFeedbacks := make([]map[int32]data.Feedback, dataSet.CountUsers())
 	if len(negFeedbackTypes) > 0 {
 		negativeSet = make([]mapset.Set[int32], dataSet.CountUsers())
 		for i := range negativeSet {
 			negativeSet[i] = mapset.NewSet[int32]()
+			negativeFeedbacks[i] = make(map[int32]data.Feedback)
 		}
 	}
 
 	// create positive set
 	positiveSet := make([]mapset.Set[int32], dataSet.CountUsers())
+	positiveFeedbacks := make([]map[int32]data.Feedback, dataSet.CountUsers())
 	for i := range positiveSet {
 		positiveSet[i] = mapset.NewSet[int32]()
+		positiveFeedbacks[i] = make(map[int32]data.Feedback)
 	}
 
 	// split item groups
@@ -462,6 +466,7 @@ func (m *Master) LoadDataFromDatabase(
 						continue
 					}
 					negativeSet[userIndex].Add(itemIndex)
+					negativeFeedbacks[userIndex][itemIndex] = f
 					mu.Lock()
 					explicitNegativeFeedbackCount++
 					evaluator.Add(f.FeedbackType, f.Value, userIndex, itemIndex, f.Timestamp)
@@ -514,6 +519,7 @@ func (m *Master) LoadDataFromDatabase(
 				}
 				// insert feedback to positive set
 				positiveSet[userIndex].Add(itemIndex)
+				positiveFeedbacks[userIndex][itemIndex] = f
 
 				mu.Lock()
 				posFeedbackCount++
@@ -573,8 +579,10 @@ func (m *Master) LoadDataFromDatabase(
 
 	// create read set (implicit negative feedback)
 	readSet := make([]mapset.Set[int32], dataSet.CountUsers())
+	readFeedbacks := make([]map[int32]data.Feedback, dataSet.CountUsers())
 	for i := range readSet {
 		readSet[i] = mapset.NewSet[int32]()
+		readFeedbacks[i] = make(map[int32]data.Feedback)
 	}
 
 	// STEP 5: pull read feedback (implicit negative feedback)
@@ -602,6 +610,7 @@ func (m *Master) LoadDataFromDatabase(
 					continue
 				}
 				readSet[userIndex].Add(itemIndex)
+				readFeedbacks[userIndex][itemIndex] = f
 				mu.Lock()
 				readFeedbackCount++
 				evaluator.Add(f.FeedbackType, f.Value, userIndex, itemIndex, f.Timestamp)
@@ -637,6 +646,8 @@ func (m *Master) LoadDataFromDatabase(
 		Items:      make([]int32, 0, estimatedNumFeedbacks),
 		Target:     make([]float32, 0, estimatedNumFeedbacks),
 	}
+	feedbackTypes := make([]string, 0, estimatedNumFeedbacks)
+	feedbackValues := make([]float64, 0, estimatedNumFeedbacks)
 	ctrDataset.ItemEmbeddingIndex = itemEmbeddingIndexer
 	ctrDataset.ItemEmbeddingDimension = make([]int, len(itemEmbeddingDimension))
 	for i, dimension := range itemEmbeddingDimension {
@@ -658,32 +669,51 @@ func (m *Master) LoadDataFromDatabase(
 		// insert explicit negative feedback (highest priority)
 		if negativeSet != nil {
 			for _, itemIndex := range negativeSet[userIndex].ToSlice() {
+				feedback := negativeFeedbacks[userIndex][itemIndex]
 				ctrDataset.Users = append(ctrDataset.Users, int32(userIndex))
 				ctrDataset.Items = append(ctrDataset.Items, itemIndex)
 				ctrDataset.Target = append(ctrDataset.Target, -1)
+				feedbackTypes = append(feedbackTypes, feedback.FeedbackType)
+				feedbackValues = append(feedbackValues, feedback.Value)
 				ctrDataset.NegativeCount++
 			}
 		}
 		// insert positive feedback
 		for _, itemIndex := range positiveSet[userIndex].ToSlice() {
+			feedback := positiveFeedbacks[userIndex][itemIndex]
 			ctrDataset.Users = append(ctrDataset.Users, int32(userIndex))
 			ctrDataset.Items = append(ctrDataset.Items, itemIndex)
 			ctrDataset.Target = append(ctrDataset.Target, 1)
+			feedbackTypes = append(feedbackTypes, feedback.FeedbackType)
+			feedbackValues = append(feedbackValues, feedback.Value)
 			ctrDataset.PositiveCount++
 		}
 		// insert read feedback (implicit negative)
 		for _, itemIndex := range readSet[userIndex].ToSlice() {
+			feedback := readFeedbacks[userIndex][itemIndex]
 			ctrDataset.Users = append(ctrDataset.Users, int32(userIndex))
 			ctrDataset.Items = append(ctrDataset.Items, itemIndex)
 			ctrDataset.Target = append(ctrDataset.Target, -1)
+			feedbackTypes = append(feedbackTypes, feedback.FeedbackType)
+			feedbackValues = append(feedbackValues, feedback.Value)
 			ctrDataset.NegativeCount++
 		}
 		// release sets
 		if negativeSet != nil {
 			negativeSet[userIndex] = nil
+			negativeFeedbacks[userIndex] = nil
 		}
 		positiveSet[userIndex] = nil
+		positiveFeedbacks[userIndex] = nil
 		readSet[userIndex] = nil
+		readFeedbacks[userIndex] = nil
+	}
+	if len(m.Config.Recommend.DataSource.FeedbackWeight) > 0 {
+		weights, weightErr := logics.ComputeSampleWeights(m.Config.Recommend.DataSource.FeedbackWeight, feedbackTypes, feedbackValues)
+		if weightErr != nil {
+			return nil, nil, errors.Trace(weightErr)
+		}
+		ctrDataset.Weights = weights
 	}
 	log.Logger().Debug("created ranking dataset",
 		zap.Int("n_valid_positive", ctrDataset.PositiveCount),

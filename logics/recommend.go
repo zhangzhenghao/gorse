@@ -320,6 +320,16 @@ func (r *Recommender) recommendUserToUser(name string) RecommenderFunc {
 		if err != nil {
 			return nil, "", errors.Trace(err)
 		}
+		// compile feedback weight expressions
+		weightPrograms := make(map[string]*vm.Program, len(r.config.DataSource.FeedbackWeight))
+		for fbType, exprStr := range r.config.DataSource.FeedbackWeight {
+			program, err := CompileWeightExpression(exprStr)
+			if err != nil {
+				// log error but continue with default weight
+				continue
+			}
+			weightPrograms[fbType] = program
+		}
 		// aggregate scores
 		for _, user := range similarUsers {
 			// load historical feedback
@@ -330,7 +340,14 @@ func (r *Recommender) recommendUserToUser(name string) RecommenderFunc {
 			// add unseen items
 			for _, feedback := range feedbacks {
 				if !r.excludeSet.Contains(feedback.ItemId) {
-					scores[feedback.ItemId] += user.Score
+					fbWeight := 1.0 // default weight
+					if program, ok := weightPrograms[feedback.FeedbackType]; ok {
+						w, err := EvaluateWeight(program, feedback.Value)
+						if err == nil {
+							fbWeight = float64(w)
+						}
+					}
+					scores[feedback.ItemId] += user.Score * fbWeight
 				}
 			}
 		}
