@@ -32,6 +32,7 @@ import (
 	"github.com/gorse-io/gorse/common/event"
 	"github.com/gorse-io/gorse/common/expression"
 	"github.com/gorse-io/gorse/common/heap"
+	"github.com/gorse-io/gorse/common/jsonutil"
 	"github.com/gorse-io/gorse/common/log"
 	"github.com/gorse-io/gorse/config"
 	"github.com/gorse-io/gorse/logics"
@@ -1037,6 +1038,149 @@ type Success struct {
 	RowAffected int
 }
 
+func validateJSONSize(name string, value any, limit int) error {
+	if limit <= 0 || value == nil {
+		return nil
+	}
+	buf := jsonutil.MustMarshal(value)
+	if len(buf) > limit {
+		return errors.Errorf("%s size exceeds limit (%d > %d bytes)", name, len(buf), limit)
+	}
+	return nil
+}
+
+func validateItemSize(item data.Item, quota config.QuotaConfig) error {
+	if err := validateJSONSize("item labels", item.Labels, quota.MaxLabelsSize); err != nil {
+		return err
+	}
+	if quota.MaxCommentSize > 0 && len(item.Comment) > quota.MaxCommentSize {
+		return errors.Errorf("item comment size exceeds limit (%d > %d bytes)",
+			len(item.Comment), quota.MaxCommentSize)
+	}
+	if quota.MaxCategoriesCount > 0 && len(item.Categories) > quota.MaxCategoriesCount {
+		return errors.Errorf("item categories count exceeds limit (%d > %d)",
+			len(item.Categories), quota.MaxCategoriesCount)
+	}
+	if len(item.Categories) > 0 {
+		if err := validateJSONSize("item categories", item.Categories, quota.MaxCategoriesSize); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateItemPatchSize(patch data.ItemPatch, quota config.QuotaConfig) error {
+	if err := validateJSONSize("item labels", patch.Labels, quota.MaxLabelsSize); err != nil {
+		return err
+	}
+	if quota.MaxCommentSize > 0 && patch.Comment != nil && len(*patch.Comment) > quota.MaxCommentSize {
+		return errors.Errorf("item comment size exceeds limit (%d > %d bytes)",
+			len(*patch.Comment), quota.MaxCommentSize)
+	}
+	if quota.MaxCategoriesCount > 0 && patch.Categories != nil && len(patch.Categories) > quota.MaxCategoriesCount {
+		return errors.Errorf("item categories count exceeds limit (%d > %d)",
+			len(patch.Categories), quota.MaxCategoriesCount)
+	}
+	if patch.Categories != nil {
+		if err := validateJSONSize("item categories", patch.Categories, quota.MaxCategoriesSize); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateUserSize(user data.User, quota config.QuotaConfig) error {
+	if err := validateJSONSize("user labels", user.Labels, quota.MaxLabelsSize); err != nil {
+		return err
+	}
+	if quota.MaxCommentSize > 0 && len(user.Comment) > quota.MaxCommentSize {
+		return errors.Errorf("user comment size exceeds limit (%d > %d bytes)",
+			len(user.Comment), quota.MaxCommentSize)
+	}
+	return nil
+}
+
+func validateUserPatchSize(patch data.UserPatch, quota config.QuotaConfig) error {
+	if err := validateJSONSize("user labels", patch.Labels, quota.MaxLabelsSize); err != nil {
+		return err
+	}
+	if quota.MaxCommentSize > 0 && patch.Comment != nil && len(*patch.Comment) > quota.MaxCommentSize {
+		return errors.Errorf("user comment size exceeds limit (%d > %d bytes)",
+			len(*patch.Comment), quota.MaxCommentSize)
+	}
+	return nil
+}
+
+func validateFeedbackSize(feedback data.Feedback, quota config.QuotaConfig) error {
+	if err := validateJSONSize("feedback labels", feedback.Labels, quota.MaxLabelsSize); err != nil {
+		return err
+	}
+	if quota.MaxCommentSize > 0 && len(feedback.Comment) > quota.MaxCommentSize {
+		return errors.Errorf("feedback comment size exceeds limit (%d > %d bytes)",
+			len(feedback.Comment), quota.MaxCommentSize)
+	}
+	return nil
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique
+}
+
+func (s *RestServer) checkUserCountLimit(ctx context.Context, userIds []string) error {
+	limit := s.Config.Quota.MaxUsersCount
+	if limit <= 0 {
+		return nil
+	}
+	totalUsers, err := s.DataClient.CountUsers(ctx)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	newUsers := 0
+	for _, userId := range uniqueStrings(userIds) {
+		if _, err = s.DataClient.GetUser(ctx, userId); err != nil {
+			if errors.Is(err, errors.NotFound) {
+				newUsers++
+				continue
+			}
+			return errors.Trace(err)
+		}
+	}
+	if totalUsers+newUsers > limit {
+		return errors.Errorf("users count exceeds limit (%d > %d)", totalUsers+newUsers, limit)
+	}
+	return nil
+}
+
+func (s *RestServer) checkItemCountLimit(ctx context.Context, itemIds []string) error {
+	limit := s.Config.Quota.MaxItemsCount
+	if limit <= 0 {
+		return nil
+	}
+	totalItems, err := s.DataClient.CountItems(ctx)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	uniqueItemIds := uniqueStrings(itemIds)
+	existedItems, err := s.DataClient.BatchGetItems(ctx, uniqueItemIds, data.GetOptions{ReturnId: true})
+	if err != nil {
+		return errors.Trace(err)
+	}
+	newItems := len(uniqueItemIds) - len(existedItems)
+	if totalItems+newItems > limit {
+		return errors.Errorf("items count exceeds limit (%d > %d)", totalItems+newItems, limit)
+	}
+	return nil
+}
+
 func (s *RestServer) insertUser(request *restful.Request, response *restful.Response) {
 	ctx := context.Background()
 	if request != nil && request.Request != nil {
@@ -1050,6 +1194,14 @@ func (s *RestServer) insertUser(request *restful.Request, response *restful.Resp
 	}
 	// validate labels
 	if err := data.ValidateLabels(temp.Labels); err != nil {
+		BadRequest(response, err)
+		return
+	}
+	if err := validateUserSize(temp, s.Config.Quota); err != nil {
+		BadRequest(response, err)
+		return
+	}
+	if err := s.checkUserCountLimit(ctx, []string{temp.UserId}); err != nil {
 		BadRequest(response, err)
 		return
 	}
@@ -1080,6 +1232,10 @@ func (s *RestServer) modifyUser(request *restful.Request, response *restful.Resp
 	}
 	// validate labels
 	if err := data.ValidateLabels(patch.Labels); err != nil {
+		BadRequest(response, err)
+		return
+	}
+	if err := validateUserPatchSize(patch, s.Config.Quota); err != nil {
 		BadRequest(response, err)
 		return
 	}
@@ -1131,6 +1287,16 @@ func (s *RestServer) insertUsers(request *restful.Request, response *restful.Res
 			BadRequest(response, err)
 			return
 		}
+		if err := validateUserSize(user, s.Config.Quota); err != nil {
+			BadRequest(response, err)
+			return
+		}
+	}
+	if err := s.checkUserCountLimit(ctx, lo.Map(temp, func(user data.User, index int) string {
+		return user.UserId
+	})); err != nil {
+		BadRequest(response, err)
+		return
 	}
 	// range temp and achieve user
 	if err := s.DataClient.BatchInsertUsers(ctx, temp); err != nil {
@@ -1257,6 +1423,12 @@ func (s *RestServer) batchInsertItems(ctx context.Context, response *restful.Res
 	for _, item := range existedItems {
 		existedItemsSet[item.ItemId] = item
 	}
+	if err = s.checkItemCountLimit(ctx, lo.Map(temp, func(item Item, index int) string {
+		return item.ItemId
+	})); err != nil {
+		BadRequest(response, err)
+		return
+	}
 	loadExistedItemsTime = time.Since(start)
 
 	start = time.Now()
@@ -1270,14 +1442,19 @@ func (s *RestServer) batchInsertItems(ctx context.Context, response *restful.Res
 				return
 			}
 		}
-		items = append(items, data.Item{
+		dataItem := data.Item{
 			ItemId:     item.ItemId,
 			IsHidden:   item.IsHidden,
 			Categories: item.Categories,
 			Timestamp:  timestamp,
 			Labels:     item.Labels,
 			Comment:    item.Comment,
-		})
+		}
+		if err = validateItemSize(dataItem, s.Config.Quota); err != nil {
+			BadRequest(response, err)
+			return
+		}
+		items = append(items, dataItem)
 		// update items cache
 		if err = s.CacheClient.UpdateScores(ctx, cache.ItemCache, nil, item.ItemId, cache.ScorePatch{
 			Categories: withWildCard(item.Categories),
@@ -1371,6 +1548,10 @@ func (s *RestServer) modifyItem(request *restful.Request, response *restful.Resp
 	}
 	// validate labels
 	if err := data.ValidateLabels(patch.Labels); err != nil {
+		BadRequest(response, err)
+		return
+	}
+	if err := validateItemPatchSize(patch, s.Config.Quota); err != nil {
 		BadRequest(response, err)
 		return
 	}
@@ -1498,6 +1679,10 @@ func (s *RestServer) insertItemCategory(request *restful.Request, response *rest
 	if !lo.Contains(item.Categories, category) {
 		item.Categories = append(item.Categories, category)
 	}
+	if err = validateItemSize(item, s.Config.Quota); err != nil {
+		BadRequest(response, err)
+		return
+	}
 	// insert category to database
 	if err = s.DataClient.BatchInsertItems(ctx, []data.Item{item}); err != nil {
 		InternalServerError(response, err)
@@ -1592,6 +1777,26 @@ func (s *RestServer) insertFeedback(overwrite bool) func(request *restful.Reques
 			items.Add(feedbackLiterTime[i].ItemId)
 			feedback[i], err = feedbackLiterTime[i].ToDataFeedback()
 			if err != nil {
+				BadRequest(response, err)
+				return
+			}
+			if err = data.ValidateLabels(feedback[i].Labels); err != nil {
+				BadRequest(response, err)
+				return
+			}
+			if err = validateFeedbackSize(feedback[i], s.Config.Quota); err != nil {
+				BadRequest(response, err)
+				return
+			}
+		}
+		if s.Config.Server.AutoInsertUser {
+			if err = s.checkUserCountLimit(ctx, users.ToSlice()); err != nil {
+				BadRequest(response, err)
+				return
+			}
+		}
+		if s.Config.Server.AutoInsertItem {
+			if err = s.checkItemCountLimit(ctx, items.ToSlice()); err != nil {
 				BadRequest(response, err)
 				return
 			}
