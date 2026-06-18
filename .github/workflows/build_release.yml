@@ -21,6 +21,18 @@ jobs:
         with:
           go-version-file: ./go.mod
 
+      - name: Install OpenBLAS cross build dependencies
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo dpkg --add-architecture riscv64
+          sudo dpkg --add-architecture loong64
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-x86-64-linux-gnu libopenblas-dev:amd64 \
+            gcc-aarch64-linux-gnu libopenblas-dev:arm64 \
+            gcc-riscv64-linux-gnu libopenblas-dev:riscv64 \
+            gcc-loongarch64-linux-gnu libopenblas-dev:loong64
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
