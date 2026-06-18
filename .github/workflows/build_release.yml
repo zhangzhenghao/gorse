@@ -21,6 +21,46 @@ jobs:
         with:
           go-version-file: ./go.mod
 
+      - name: Install OpenBLAS cross build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends debian-archive-keyring
+
+          sudo sed -i '/^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          sudo tee /etc/apt/sources.list.d/ubuntu-ports.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-backports
+          Components: main restricted universe multiverse
+          Architectures: arm64 riscv64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble-security
+          Components: main restricted universe multiverse
+          Architectures: arm64 riscv64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
+          sudo tee /etc/apt/sources.list.d/debian-loong64.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://deb.debian.org/debian
+          Suites: unstable
+          Components: main
+          Architectures: loong64
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          EOF
+
+          sudo dpkg --add-architecture arm64
+          sudo dpkg --add-architecture riscv64
+          sudo dpkg --add-architecture loong64
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-x86-64-linux-gnu libopenblas-dev:amd64 \
+            gcc-aarch64-linux-gnu libopenblas-dev:arm64 \
+            gcc-riscv64-linux-gnu libopenblas-dev:riscv64 \
+            gcc-loongarch64-linux-gnu libopenblas-dev:loong64
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
