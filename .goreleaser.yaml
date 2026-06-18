@@ -3,68 +3,95 @@ version: 2
 project_name: gorse
 
 builds:
-  - id: gorse-bench
+  - &linux_build
+    id: gorse-bench-linux
     main: ./cmd/gorse-bench
     binary: gorse-bench
     env:
-      - CGO_ENABLED=0
-    targets: &linux_windows_targets
+      - CGO_ENABLED=1
+      - CC_linux_amd64=x86_64-linux-gnu-gcc
+      - CC_linux_arm64=aarch64-linux-gnu-gcc
+      - CC_linux_loong64=loongarch64-linux-gnu-gcc
+      - CC_linux_riscv64=riscv64-linux-gnu-gcc
+      - 'CC={{ index .Env (print "CC_" .Os "_" .Arch) }}'
+    tags:
+      - openblas
+    targets: &linux_targets
       - linux_amd64
       - linux_arm64
       - linux_loong64
       - linux_riscv64
-      - windows_amd64
-      - windows_arm64
     ldflags: &ldflags
       - >-
         -X 'github.com/gorse-io/gorse/cmd/version.Version={{ .Version }}'
         -X 'github.com/gorse-io/gorse/cmd/version.GitCommit={{ .Commit }}'
         -X 'github.com/gorse-io/gorse/cmd/version.BuildTime={{ .Date }}'
-  - id: gorse-cli
+  - <<: *linux_build
+    id: gorse-cli-linux
     main: ./cmd/gorse-cli
     binary: gorse-cli
-    env:
-      - CGO_ENABLED=0
-    targets: *linux_windows_targets
-    ldflags: *ldflags
-  - id: gorse-in-one
+  - <<: *linux_build
+    id: gorse-in-one-linux
     main: ./cmd/gorse-in-one
     binary: gorse-in-one
-    env:
-      - CGO_ENABLED=0
-    targets: *linux_windows_targets
-    ldflags: *ldflags
-  - id: gorse-master
+  - <<: *linux_build
+    id: gorse-master-linux
     main: ./cmd/gorse-master
     binary: gorse-master
-    env:
-      - CGO_ENABLED=0
-    targets: *linux_windows_targets
-    ldflags: *ldflags
-  - id: gorse-server
+  - <<: *linux_build
+    id: gorse-server-linux
     main: ./cmd/gorse-server
     binary: gorse-server
-    env:
-      - CGO_ENABLED=0
-    targets: *linux_windows_targets
-    ldflags: *ldflags
-  - id: gorse-worker
+  - <<: *linux_build
+    id: gorse-worker-linux
     main: ./cmd/gorse-worker
     binary: gorse-worker
+  - &windows_build
+    id: gorse-bench-windows
+    main: ./cmd/gorse-bench
+    binary: gorse-bench
     env:
       - CGO_ENABLED=0
-    targets: *linux_windows_targets
+    targets: &windows_targets
+      - windows_amd64
+      - windows_arm64
     ldflags: *ldflags
+  - <<: *windows_build
+    id: gorse-cli-windows
+    main: ./cmd/gorse-cli
+    binary: gorse-cli
+  - <<: *windows_build
+    id: gorse-in-one-windows
+    main: ./cmd/gorse-in-one
+    binary: gorse-in-one
+  - <<: *windows_build
+    id: gorse-master-windows
+    main: ./cmd/gorse-master
+    binary: gorse-master
+  - <<: *windows_build
+    id: gorse-server-windows
+    main: ./cmd/gorse-server
+    binary: gorse-server
+  - <<: *windows_build
+    id: gorse-worker-windows
+    main: ./cmd/gorse-worker
+    binary: gorse-worker
 
 archives:
   - id: gorse
     ids: &all_builds
-      - gorse-bench
-      - gorse-cli
-      - gorse-in-one
-      - gorse-master
-      - gorse-server
-      - gorse-worker
+      - gorse-bench-linux
+      - gorse-cli-linux
+      - gorse-in-one-linux
+      - gorse-master-linux
+      - gorse-server-linux
+      - gorse-worker-linux
+      - gorse-bench-windows
+      - gorse-cli-windows
+      - gorse-in-one-windows
+      - gorse-master-windows
+      - gorse-server-windows
+      - gorse-worker-windows
     formats:
       - zip
     name_template: "gorse_{{ .Os }}_{{ .Arch }}"
@@ -72,7 +99,8 @@ archives:
       - none*
   - id: gorse-cli
     ids:
-      - gorse-cli
+      - gorse-cli-linux
+      - gorse-cli-windows
     formats:
       - binary
     name_template: "gorse-cli_{{ .Os }}_{{ .Arch }}"
